@@ -1,28 +1,69 @@
 import logging
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 import asyncio
 import os
+from datetime import datetime, timedelta
 
-TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-CHANNEL_ID = os.getenv("CHANNEL_ID")
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import sqlite3
 
+# ====== CONFIG ======
+TOKEN = os.getenv("8267749053:AAEfuV5vNbZ_rBOjBz2Y65_fDQiGiorJ_qo")
+ADMIN_USERNAME = "@odos567"
+CHANNEL_ID = os.getenv("@ghjuuf")
+
+# ====== INIT ======
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
-
 logging.basicConfig(level=logging.INFO)
 
-posts = {}
-scheduled = {}
+# ====== DB ======
+conn = sqlite3.connect("db.sqlite3")
+cursor = conn.cursor()
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    username TEXT,
+    content_type TEXT,
+    file_id TEXT,
+    text TEXT,
+    status TEXT,
+    scheduled_time TEXT,
+    rejection_reason TEXT
+)
+""")
+conn.commit()
+
+# ====== TIME SLOTS ======
 TIME_SLOTS = ["10:00", "13:00", "16:00", "19:00", "22:00"]
 
-# Получение поста от пользователя
+# ====== HELPERS ======
+def is_admin(user: types.User):
+    return user.username == ADMIN_USERNAME.replace("@", "")
+
+def get_busy_slots(date):
+    cursor.execute("SELECT scheduled_time FROM posts WHERE scheduled_time LIKE ?", (f"{date}%",))
+    return [row[0].split(" ")[1] for row in cursor.fetchall()]
+
+# ====== USER SEND POST ======
 @dp.message_handler(content_types=['text', 'photo'])
 async def handle_post(message: types.Message):
-    post_id = message.message_id
-    posts[post_id] = message
+    file_id = None
+    text = message.text
+
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        text = message.caption
+
+    cursor.execute("""
+    INSERT INTO posts (user_id, username, content_type, file_id, text, status)
+    VALUES (?, ?, ?, ?, ?, 'pending')
+    """, (message.from_user.id, message.from_user.username, message.content_type, file_id, text))
+    conn.commit()
+
+    post_id = cursor.lastrowid
 
     kb = InlineKeyboardMarkup()
     kb.add(
@@ -30,70 +71,119 @@ async def handle_post(message: types.Message):
         InlineKeyboardButton("Отклонить ❌", callback_data=f"reject_{post_id}")
     )
 
-    await bot.send_message(
-        ADMIN_ID,
-        "Новая заявка:",
-    )
-    await message.forward(ADMIN_ID)
-    await bot.send_message(ADMIN_ID, "Выбери действие:", reply_markup=kb)
+    await bot.send_message(ADMIN_USERNAME, f"Новая заявка #{post_id}")
+    await message.forward(ADMIN_USERNAME)
+    await bot.send_message(ADMIN_USERNAME, "Выбери действие:", reply_markup=kb)
 
-# Принятие поста
+    await message.answer("Пост отправлен на модерацию")
+
+# ====== ACCEPT ======
 @dp.callback_query_handler(lambda c: c.data.startswith("accept"))
-async def accept_post(callback: types.CallbackQuery):
+async def accept(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user):
+        return
+
     post_id = int(callback.data.split("_")[1])
+    today = datetime.now().strftime("%Y-%m-%d")
+    busy = get_busy_slots(today)
 
     kb = InlineKeyboardMarkup(row_width=2)
 
     for t in TIME_SLOTS:
-        if t in scheduled:
+        if t in busy:
             kb.insert(InlineKeyboardButton(f"{t} 🔴", callback_data="busy"))
         else:
             kb.insert(InlineKeyboardButton(f"{t} 🟢", callback_data=f"time_{post_id}_{t}"))
 
     await callback.message.answer("Выбери время:", reply_markup=kb)
 
-# Выбор времени
+# ====== SELECT TIME ======
 @dp.callback_query_handler(lambda c: c.data.startswith("time"))
 async def set_time(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user):
+        return
+
     _, post_id, time = callback.data.split("_")
     post_id = int(post_id)
 
-    scheduled[time] = post_id
+    today = datetime.now().strftime("%Y-%m-%d")
+    full_time = f"{today} {time}"
 
-    await callback.message.answer(f"Запланировано на {time}")
+    cursor.execute("""
+    UPDATE posts SET status='scheduled', scheduled_time=?
+    WHERE id=?
+    """, (full_time, post_id))
+    conn.commit()
 
-# Отклонение
+    await callback.message.answer(f"Пост запланирован на {full_time}")
+
+# ====== REJECT ======
+waiting_reject = {}
+
 @dp.callback_query_handler(lambda c: c.data.startswith("reject"))
-async def reject_post(callback: types.CallbackQuery):
+async def reject(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user):
+        return
+
     post_id = int(callback.data.split("_")[1])
-    posts[post_id] = {"status": "waiting_reason"}
+    waiting_reject[callback.from_user.id] = post_id
 
-    await callback.message.answer("Напиши причину отказа")
+    await callback.message.answer("Напиши причину отказа (обязательно)")
 
-# Причина отказа
+# ====== REASON ======
 @dp.message_handler()
-async def reason_handler(message: types.Message):
-    for k, v in posts.items():
-        if isinstance(v, dict) and v.get("status") == "waiting_reason":
-            await bot.send_message(k, f"Ваш пост отклонён:\n{message.text}")
-            posts[k] = None
-            await message.answer("Отправлено пользователю")
-            break
+async def handle_reason(message: types.Message):
+    if message.from_user.id not in waiting_reject:
+        r
 
-# Публикация (каждую минуту проверка)
+
+eturn
+
+    reason = message.text.strip()
+    if not reason:
+        await message.answer("Причина обязательна!")
+        return
+
+    post_id = waiting_reject.pop(message.from_user.id)
+
+    cursor.execute("SELECT user_id FROM posts WHERE id=?", (post_id,))
+    user_id = cursor.fetchone()[0]
+
+    cursor.execute("""
+    UPDATE posts SET status='rejected', rejection_reason=?
+    WHERE id=?
+    """, (reason, post_id))
+    conn.commit()
+
+    await bot.send_message(user_id, f"Ваш пост отклонён:\n\nПричина: {reason}")
+    await message.answer("Отказ отправлен")
+
+# ====== SCHEDULER ======
 async def scheduler():
     while True:
-        now = asyncio.get_event_loop().time()
-        for t, post_id in list(scheduled.items()):
-            msg = posts.get(post_id)
-            if msg:
-                if msg.content_type == "text":
-                    await bot.send_message(CHANNEL_ID, msg.text)
-                elif msg.content_type == "photo":
-                    await bot.send_photo(CHANNEL_ID, msg.photo[-1].file_id, caption=msg.caption)
-                scheduled.pop(t)
-        await asyncio.sleep(60)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+        cursor.execute("""
+        SELECT id, content_type, file_id, text
+        FROM posts
+        WHERE status='scheduled' AND scheduled_time=?
+        """, (now,))
+        posts = cursor.fetchall()
+
+        for p in posts:
+            post_id, content_type, file_id, text = p
+
+            if content_type == "text":
+                await bot.send_message(CHANNEL_ID, text)
+            else:
+                await bot.send_photo(CHANNEL_ID, file_id, caption=text)
+
+            cursor.execute("UPDATE posts SET status='posted' WHERE id=?", (post_id,))
+            conn.commit()
+
+        await asyncio.sleep(30)
+
+# ====== MAIN ======
 async def main():
     asyncio.create_task(scheduler())
     await dp.start_polling()
