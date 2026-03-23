@@ -1,4 +1,4 @@
-mport asyncio
+import asyncio
 import sqlite3
 from datetime import datetime, time, timedelta
 from aiogram import Bot, Dispatcher, types, F
