@@ -10,7 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncioScheduler
 
 # --- КОНФИГ ---
 TOKEN = "8267749053:AAEfuV5vNbZ_rBOjBz2Y65_fDQiGiorJ_qo"
-ADMIN_ID = 123456789  # <--- ЗАМЕНИ НА СВОЙ ID (ЧИСЛА)
+ADMIN_ID = @odos567  # <--- ЗАМЕНИ НА СВОЙ ID (ЧИСЛА)
 CHANNEL_ID = "@ghjuuf"
 TIMES = ["10:00", "13:00", "16:00", "19:00", "22:00"]
 
