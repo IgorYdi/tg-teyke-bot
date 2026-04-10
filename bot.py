@@ -1,156 +1,138 @@
+import os
 import asyncio
-import sqlite3
-from datetime import datetime, time, timedelta
+import logging
+import pytz
+from datetime import datetime, timedelta
+from threading import Thread
+from flask import Flask
+
+# Библиотеки бота
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from apscheduler.schedulers.asyncio import AsyncioScheduler
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# --- КОНФИГ ---
-TOKEN = "8267749053:AAEfuV5vNbZ_rBOjBz2Y65_fDQiGiorJ_qo"
-ADMIN_ID = @odos567  # <--- ЗАМЕНИ НА СВОЙ ID (ЧИСЛА)
-CHANNEL_ID = "@ghjuuf"
-TIMES = ["10:00", "13:00", "16:00", "19:00", "22:00"]
+# Планировщик и БД
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+from sqlalchemy import create_engine, Column, String, Integer
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
-# --- ИНИЦИАЛИЗАЦИЯ ---
-bot = Bot(token=TOKEN)
+# --- ВЕБ-ЗАГЛУШКА ДЛЯ ХОСТИНГА (чтобы не спал) ---
+app = Flask('')
+@app.route('/')
+def home(): return "Bot is running!"
+
+def run_web():
+    app.run(host='0.0.0.0', port=8080)
+
+# --- НАСТРОЙКИ ---
+API_TOKEN = '8702698153:AAHmS-M1VibhAcjsSAvUqTySRnTexB0xX2c'
+ADMIN_ID = 7805872198
+CHANNEL_ID = -1003106826537
+MOSCOW_TZ = pytz.timezone('Europe/Moscow')
+TIMES = ["7:00", "08:00", "10:00", "13:00", "16:00", "19:00", "22:00"]
+
+# ВСТАВЬ СВОЮ ССЫЛКУ ИЗ SUPABASE ТУТ:
+DB_URL = "postgresql://postgres:[YOUR-PASSWORD]@db.benfreggxmmmleypervi.supabase.co:5432/postgres"
+
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
-scheduler = AsyncioScheduler()
 
-# База в оперативной памяти (сбросится при перезагрузке, как ты и хотел)
-db = sqlite3.connect(":memory:", check_same_thread=False)
-cur = db.cursor()
-cur.execute("CREATE TABLE slots (date TEXT, time TEXT)")
-cur.execute("CREATE TABLE queue (id INTEGER PRIMARY KEY, user_id INTEGER, type TEXT, file_id TEXT, caption TEXT)")
-db.commit()
+# Настройка планировщика с внешней БД
+jobstores = {'default': SQLAlchemyJobStore(url=DB_URL)}
+scheduler = AsyncIOScheduler(jobstores=jobstores, timezone=MOSCOW_TZ)
+
+# --- БАЗА ДАННЫХ ДЛЯ СЛОТОВ ---
+Base = declarative_base()
+engine = create_engine(DB_URL)
+Session = sessionmaker(bind=engine)
+
+class Schedule(Base):
+    __tablename__ = 'schedule_slots'
+    id = Column(Integer, primary_key=True)
+    date_time_key = Column(String, unique=True) # Формат "ГГГГ-ММ-ДД ЧЧ:ММ"
+
+Base.metadata.create_all(engine)
 
 class PostStates(StatesGroup):
     waiting_for_reason = State()
 
 # --- ЛОГИКА ---
-
-@dp.message(Command("start"))
-async def start(message: types.Message):
-    await message.answer("Пришли пост (текст или фото с подписью).")
-
-# Прием постов от пользователей
-@dp.message(F.chat.type == "private")
-async def handle_submission(message: types.Message):
-    if message.from_user.id == ADMIN_ID:
-        await message.answer("Ты админ, но посты присылай как обычный юзер для теста.")
-    
-    m_type = "photo" if message.photo else "text"
-    file_id = message.photo[-1].file_id if message.photo else ""
-    caption = message.caption or message.text or ""
-    
-    cur.execute("INSERT INTO queue (user_id, type, file_id, caption) VALUES (?, ?, ?, ?)", 
-                (message.from_user.id, m_type, file_id, caption))
-    db.commit()
-    post_id = cur.lastrowid
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Принять ✅", callback_data=f"accept_{post_id}")
-    kb.button(text="Отклонить ❌", callback_data=f"reject_{post_id}")
-    
-    await bot.send_message(ADMIN_ID, f"⚡️ Новая заявка #{post_id}")
-    await message.copy_to(ADMIN_ID, reply_markup=kb.as_markup())
-    await message.answer("Отправил админу!")
-
-# Кнопка "Отклонить"
-@dp.callback_query(F.data.startswith("reject_"))
-async def reject_callback(callback: types.CallbackQuery, state: FSMContext):
-    post_id = callback.data.split("_")[1]
-    await state.update_data(reject_post_id=post_id)
-
-    await state.set_state(PostStates.waiting_for_reason)
-    await callback.message.answer("Напиши причину отказа:")
-    await callback.answer()
-
-# Обработка текста причины отказа
-@dp.message(PostStates.waiting_for_reason)
-async def send_rejection(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    post_id = data.get("reject_post_id")
-    
-    cur.execute("SELECT user_id FROM queue WHERE id = ?", (post_id,))
-    res = cur.fetchone()
-    if res:
-        await bot.send_message(res[0], f"❌ Твой пост отклонен.\nПричина: {message.text}")
-        await message.answer("Пользователь уведомлен.")
-    await state.clear()
-
-# Кнопка "Принять" -> Выбор времени
-@dp.callback_query(F.data.startswith("accept_"))
-async def show_times(callback: types.CallbackQuery):
-    post_id = callback.data.split("_")[1]
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    cur.execute("SELECT time FROM slots WHERE date = ?", (today,))
-    taken_times = [row[0] for row in cur.fetchall()]
-    
-    kb = InlineKeyboardBuilder()
-    for t in TIMES:
-        is_taken = t in taken_times
-        status = "🔴" if is_taken else "🟢"
-        cb_data = "ignore" if is_taken else f"sched_{post_id}_{t}"
-        kb.button(text=f"{status} {t}", callback_data=cb_data)
-    
-    kb.adjust(1)
-    await callback.message.edit_reply_markup(reply_markup=kb.as_markup())
-
-# Выбор конкретного времени и постановка в очередь
-@dp.callback_query(F.data.startswith("sched_"))
-async def schedule_post(callback: types.CallbackQuer
-
-
-y):
-    _, post_id, post_time = callback.data.split("_")
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    cur.execute("INSERT INTO slots (date, time) VALUES (?, ?)", (today, post_time))
-    cur.execute("SELECT user_id, type, file_id, caption FROM queue WHERE id = ?", (post_id,))
-    data = cur.fetchone()
-    db.commit()
-
-    # Считаем когда постить
-    target_time = time.fromisoformat(post_time)
-    run_date = datetime.combine(datetime.now().date(), target_time)
-    
-    if run_date < datetime.now():
-        run_date += timedelta(days=1) # Если время уже прошло сегодня, шлем завтра
-
-    scheduler.add_job(
-        send_to_channel, 
-        "date", 
-        run_date=run_date, 
-        args=[data[1], data[2], data[3]]
-    )
-    
-    await callback.message.edit_text(f"✅ Запланировано на {post_time}")
-    await bot.send_message(data[0], f"✅ Твой пост опубликуют в {post_time}")
-
-# Сама функция отправки в канал
-async def send_to_channel(m_type, file_id, caption):
+async def send_to_channel(photo_id, caption):
     try:
-        if m_type == "photo":
-            await bot.send_photo(CHANNEL_ID, photo=file_id, caption=caption)
-        else:
-            await bot.send_message(CHANNEL_ID, text=caption)
+        await bot.send_photo(chat_id=CHANNEL_ID, photo=photo_id, caption=caption or "")
     except Exception as e:
-        print(f"Ошибка при публикации: {e}")
+        logging.error(f"Ошибка публикации: {e}")
 
+@dp.message(Command("time"))
+async def get_time(message: types.Message):
+    now = datetime.now(MOSCOW_TZ)
+    await message.answer(f"🕒 Время МСК: {now.strftime('%H:%M:%S')}")
+
+@dp.message(F.photo)
+async def handle_post(message: types.Message):
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="✅ Принять", callback_data="appr_check"))
+    builder.row(types.InlineKeyboardButton(text="❌ Отклонить", callback_data=f"decl_{message.from_user.id}"))
+    await bot.send_photo(ADMIN_ID, message.photo[-1].file_id, 
+                         caption=f"Новая заявка!\n\n{message.caption or ''}", reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data == "appr_check")
+async def show_slots(callback: types.CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    session = Session()
+    today = datetime.now(MOSCOW_TZ).strftime("%Y-%m-%d")
+    
+    for t in TIMES:
+        key = f"{today} {t}"
+        busy = session.query(Schedule).filter_by(date_time_key=key).first()
+        icon = "🔴" if busy else "🟢"
+        cb = "ignore" if busy else f"time_{t}"
+        builder.add(types.InlineKeyboardButton(text=f"{icon} {t}", callback_data=cb))
+    
+    session.close()
+    builder.adjust(2)
+    await callback.message.edit_reply_markup(reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data.startswith("time_"))
+async def set_time(callback: types.CallbackQuery):
+    time_str = callback.data.split("_")[1]
+    now = datetime.now(MOSCOW_TZ)
+    today = now.strftime("%Y-%m-%d")
+    key = f"{today} {time_str}"
+    
+    session = Session()
+    if session.query(Schedule).filter_by(date_time_key=key).first():
+        session.close()
+        return await callback.answer("Занято!")
+
+    # Бронируем
+    new_slot = Schedule(date_time_key=key)
+    session.add(new_slot)
+    session.commit()
+    session.close()
+
+    run_time = MOSCOW_TZ.localize(datetime.strptime(key, "%Y-%m-%d %H:%M"))
+    if run_time < now: run_time += timedelta(days=1)
+
+    photo_id = callback.message.photo[-1].file_id
+    caption = callback.message.caption.replace("Новая заявка!\n\n", "")
+
+    scheduler.add_job(send_to_channel, 'date', run_date=run_time, args=[photo_id, caption], id=f"j_{run_time.timestamp()}")
+    await callback.message.edit_caption(caption=f"✅ ПРИНЯТО на {run_time.strftime('%H:%M')} МСК")
+
+# --- ЗАПУСК ---
 async def main():
-    scheduler.start()
+    if not scheduler.running: scheduler.start()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+    Thread(target=run_web).start() # Запуск веб-заглушки
     asyncio.run(main())
-
-
-
-1 сообщение
 
 
 
