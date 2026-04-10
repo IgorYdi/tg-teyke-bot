@@ -1,2 +1,6 @@
 aiogram
 apscheduler
+sqlalchemy
+psycopg2-binary
+pytz
+flask
