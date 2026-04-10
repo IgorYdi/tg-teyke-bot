@@ -37,7 +37,6 @@ TIMES = ["7:00", "08:00", "10:00", "13:00", "16:00", "19:00", "22:00"]
 
 # ВСТАВЬ СВОЮ ССЫЛКУ ИЗ SUPABASE ТУТ:
 DB_URL = "postgresql://postgres:triFonov0890@db.benfreggxmmmleypervi.supabase.co:6543/postgres?sslmode=require"
-
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
